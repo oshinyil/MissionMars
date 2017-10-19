@@ -3,51 +3,48 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using AdaptiveCards;
 using Microsoft.Bot.Builder.Dialogs;
+using Microsoft.Bot.Builder.Luis;
+using Microsoft.Bot.Builder.Luis.Models;
 using Microsoft.Bot.Connector;
 using MissionMars.Utils;
 
 namespace MissionMars.Dialogs
 {
+    [LuisModel("{LUISAppID}", "{LUISKey}")]
     [Serializable]
-    public class RootDialog : IDialog<object>
+    public class RootDialog : LuisDialog<object>
     {
         private string _category;
         private string _severity;
         private string _description;
 
-        public Task StartAsync(IDialogContext context)
+        [LuisIntent("")]
+        [LuisIntent("None")]
+        public async Task None(IDialogContext context, LuisResult result)
         {
-            context.Wait(MessageReceivedAsync);
-
-            return Task.CompletedTask;
+            await context.PostAsync($"I'm sorry, I did not understand {result.Query}.\nType 'help' to know more about me :)");
+            context.Done<object>(null);
         }
 
-        public async Task MessageReceivedAsync(IDialogContext context, IAwaitable<IMessageActivity> argument)
+        [LuisIntent("Help")]
+        public async Task Help(IDialogContext context, LuisResult result)
         {
-            var message = await argument;
-            await context.PostAsync("Hi! I’m the help desk bot and I can help you create a ticket.");
-            PromptDialog.Text(context, DescriptionMessageReceivedAsync, "First, please briefly describe your problem to me.");
-        }
-        public async Task DescriptionMessageReceivedAsync(IDialogContext context, IAwaitable<string> argument)
-        {
-            _description = await argument;
-            var severities = new[] { "high", "normal", "low" };
-            PromptDialog.Choice(context, SeverityMessageReceivedAsync, severities, "Which is the severity of this problem?");
+            await context.PostAsync("I'm the help desk bot and I can help you create a ticket.\n" +
+                                    "You can tell me things like _I need to reset my password_ or _I cannot print_.");
+            context.Done<object>(null);
         }
 
-        public async Task SeverityMessageReceivedAsync(IDialogContext context, IAwaitable<string> argument)
+        [LuisIntent("SubmitTicket")]
+        public async Task SubmitTicket(IDialogContext context, LuisResult result)
         {
-            _severity = await argument;
-            PromptDialog.Text(context, CategoryMessageReceivedAsync, "Which would be the category for this ticket (software, hardware, networking, security or other)?");
-        }
+            result.TryFindEntity("category", out var categoryEntityRecommendation);
+            result.TryFindEntity("severity", out var severityEntityRecommendation);
 
-        public async Task CategoryMessageReceivedAsync(IDialogContext context, IAwaitable<string> argument)
-        {
-            _category = await argument;
-            var text = $"Great! I'm going to create a \"{_severity}\" severity ticket in the \"{_category}\" category. " +
-                       $"The description I will use is \"{_description}\". Can you please confirm that this information is correct?";
+            _category = ((Newtonsoft.Json.Linq.JArray)categoryEntityRecommendation?.Resolution["values"])?[0]?.ToString();
+            _severity = ((Newtonsoft.Json.Linq.JArray)severityEntityRecommendation?.Resolution["values"])?[0]?.ToString();
+            _description = result.Query;
 
-            PromptDialog.Confirm(context, IssueConfirmedMessageReceivedAsync, text);
+            await EnsureTicket(context);
         }
 
         public async Task IssueConfirmedMessageReceivedAsync(IDialogContext context, IAwaitable<bool> argument)
@@ -70,7 +67,6 @@ namespace MissionMars.Dialogs
                             Content = CreateCard(ticketId, _category, _severity, _description)
                         }
                     };
-
                     await context.PostAsync(message);
                 }
                 else
@@ -84,6 +80,38 @@ namespace MissionMars.Dialogs
             }
 
             context.Done<object>(null);
+        }
+
+        private async Task EnsureTicket(IDialogContext context)
+        {
+            if (_severity == null)
+            {
+                var severities = new[] { "high", "normal", "low" };
+                PromptDialog.Choice(context, SeverityMessageReceivedAsync, severities, "Which is the severity of this problem?");
+            }
+            else if (_category == null)
+            {
+                PromptDialog.Text(context, CategoryMessageReceivedAsync, "Which would be the category for this ticket (software, hardware, networking, security or other)?");
+            }
+            else
+            {
+                var text = $"Great! I'm going to create a \"{_severity}\" severity ticket in the \"{_category}\" category. " +
+                       $"The description I will use is \"{_description}\". Can you please confirm that this information is correct?";
+
+                PromptDialog.Confirm(context, IssueConfirmedMessageReceivedAsync, text);
+            }
+        }
+
+        private async Task SeverityMessageReceivedAsync(IDialogContext context, IAwaitable<string> argument)
+        {
+            _severity = await argument;
+            await EnsureTicket(context);
+        }
+
+        private async Task CategoryMessageReceivedAsync(IDialogContext context, IAwaitable<string> argument)
+        {
+            _category = await argument;
+            await EnsureTicket(context);
         }
 
         private static AdaptiveCard CreateCard(int ticketId, string category, string severity, string description)
